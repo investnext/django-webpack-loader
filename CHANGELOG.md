@@ -5,6 +5,34 @@ For more general information, view the [readme](README.md).
 Releases are added to the
 [github release page](https://github.com/ezhome/django-webpack-loader/releases).
 
+## [3.2.4] -- 2026-05-13
+
+- Refactor `get_as_url_to_tag_dict` when dealing with extra arguments in elements
+- Fix `skip_common_chunks` usage at `get_files` to add parity with `render_bundle` (#431)
+- Add integrity and CSP nonce to preload script tags (#432)
+- Fix hanging or broken stats file (#430)
+- Handle issue when webpack stats change mid-request (#429)
+- Fix `AttributeError` in config check for non-dict `WEBPACK_LOADER` (#427)
+
+## [3.2.3] -- 2025-12-09
+
+- Add warning for default timeout usage
+
+## [3.2.2] -- 2025-10-30
+
+- Ensure parity with `webpack-bundle-tracker`
+- Update examples to always perform integrity calculation
+
+## [3.2.1] -- 2025-06-16
+
+- Update supported versions on Trove classifiers
+
+## [3.2.0] -- 2025-05-19
+
+- Automatically add `crossorigin` attributes to tags with `integrity` attributes when necessary
+- Use `request.csp_nonce` from [django-csp](https://github.com/mozilla/django-csp) if available and configured
+- Remove support for Django 3.x (LTS is EOL)
+
 ## [3.1.1] -- 2024-08-30
 
 - Add support for Django 5.1

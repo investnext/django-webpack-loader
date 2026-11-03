@@ -4,9 +4,8 @@ import time
 from shutil import rmtree
 from subprocess import call
 from threading import Thread
-from unittest.mock import Mock
-from unittest.mock import call as MockCall
 from unittest.mock import patch
+from unittest.mock import call as MockCall
 
 from django.conf import settings
 from django.template import Context, Template, engines
@@ -18,11 +17,15 @@ from django_jinja.backend import Jinja2
 from django_jinja.backend import Template as Jinja2Template
 from django_jinja.builtins import DEFAULT_EXTENSIONS
 
-from webpack_loader.exceptions import (WebpackBundleLookupError, WebpackError,
-                                       WebpackLoaderBadStatsError,
-                                       WebpackLoaderTimeoutError)
+from webpack_loader.exceptions import (
+    WebpackBundleLookupError,
+    WebpackError,
+    WebpackLoaderBadStatsError,
+    WebpackLoaderTimeoutError,
+)
+from webpack_loader.loaders import WebpackLoader
 from webpack_loader.templatetags.webpack_loader import _WARNING_MESSAGE
-from webpack_loader.utils import get_as_tags, get_loader
+from webpack_loader.utils import get_as_tags, get_loader, get_as_url_to_tag_dict
 
 BUNDLE_PATH = os.path.join(
     settings.BASE_DIR, 'assets/django_webpack_loader_bundles/')
@@ -60,6 +63,11 @@ class LoaderTestCase(TestCase):
         }):
             errors = webpack_cfg_check(None)
             expected_errors = []
+            self.assertEqual(errors, expected_errors)
+
+        with self.settings(WEBPACK_LOADER='__WRONG__'):
+            errors = webpack_cfg_check(None)
+            expected_errors = [BAD_CONFIG_ERROR]
             self.assertEqual(errors, expected_errors)
 
     def test_simple_and_css_extract(self):
@@ -151,35 +159,37 @@ class LoaderTestCase(TestCase):
         view = TemplateView.as_view(template_name='home.html')
         request = self.factory.get('/')
         result = view(request)
+        rendered_content = result.rendered_content
         self.assertIn((
             '<link href="/static/django_webpack_loader_bundles/main.css" '
-            'rel="stylesheet" />'),
-            result.rendered_content)
+            'rel="stylesheet"/>'),
+            rendered_content)
         self.assertIn((
             '<script src="/static/django_webpack_loader_bundles/main.js" '
-            'async charset="UTF-8"></script>'), result.rendered_content)
+            'async charset="UTF-8"></script>'), rendered_content)
 
         self.assertIn((
             '<link href="/static/django_webpack_loader_bundles/app2.css" '
-            'rel="stylesheet" />'), result.rendered_content)
+            'rel="stylesheet"/>'), rendered_content)
         self.assertIn((
-            '<script src="/static/django_webpack_loader_bundles/app2.js" >'
-            '</script>'), result.rendered_content)
+            '<script src="/static/django_webpack_loader_bundles/app2.js">'
+            '</script>'), rendered_content)
         self.assertIn(
-            '<img src="/static/my-image.png"/>', result.rendered_content)
+            '<img src="/static/my-image.png"/>', rendered_content)
 
-        self.assertIn('<li>All from getFiles already rendered</li>', result.rendered_content)
+        self.assertIn('<li>All from getFiles already rendered</li>', rendered_content)
 
         request = self.factory.get('/')
         view = TemplateView.as_view(template_name='only_files.html')
         result = view(request)
+        rendered_content = result.rendered_content
         self.assertIn((
             "var contentCss = "
             "'/static/django_webpack_loader_bundles/main.css'"),
-            result.rendered_content)
+            rendered_content)
         self.assertIn(
             "var contentJS = '/static/django_webpack_loader_bundles/main.js'",
-            result.rendered_content)
+            rendered_content)
 
         self.compile_bundles('webpack.config.publicPath.js')
         request = self.factory.get('/')
@@ -195,41 +205,140 @@ class LoaderTestCase(TestCase):
         view = TemplateView.as_view(template_name='preload.html')
         request = self.factory.get('/')
         result = view(request)
+        rendered_content = result.rendered_content
 
         # Preload
         self.assertIn((
             '<link href="/static/django_webpack_loader_bundles/main.css" '
-            'rel="preload" as="style" />'), result.rendered_content)
+            'rel="preload" as="style"/>'), rendered_content)
         self.assertIn((
             '<link rel="preload" as="script" href="/static/'
-            'django_webpack_loader_bundles/main.js" />'),
-            result.rendered_content)
+            'django_webpack_loader_bundles/main.js"/>'),
+            rendered_content)
 
         # Resources
         self.assertIn((
             '<link href="/static/django_webpack_loader_bundles/main.css" '
-            'rel="stylesheet" />'), result.rendered_content)
+            'rel="stylesheet"/>'), rendered_content)
         self.assertIn((
-            '<script src="/static/django_webpack_loader_bundles/main.js" >'
-            '</script>'), result.rendered_content)
+            '<script src="/static/django_webpack_loader_bundles/main.js">'
+            '</script>'), rendered_content)
 
     def test_integrity(self):
         self.compile_bundles('webpack.config.integrity.js')
 
         loader = get_loader(DEFAULT_CONFIG)
-        with patch.dict(loader.config, {'INTEGRITY': True}):
+        with patch.dict(loader.config, {'INTEGRITY': True, 'CACHE': False}):
             view = TemplateView.as_view(template_name='single.html')
             request = self.factory.get('/')
             result = view(request)
+            rendered_content = result.rendered_content
 
             self.assertIn((
-                '<script src="/static/django_webpack_loader_bundles/main.js" '
-                'integrity="sha256-1wgFMxcDlOWYV727qRvWNoPHdnOGFNVMLuKd25cjR+o=" >'
-                '</script>'), result.rendered_content)
+                '<script src="http://custom-static-host.com/main.js" '
+                'integrity="sha256-Yk6uAc7SoE41LSNc9zTBxij8YhVqBIIuRpLCaTyqrl'
+                'Q= sha384-cwtz5c2CaEK8Q8ZeraWgf3qo7eO5jUDE8XMo00QTUCcbmF/fLu'
+                'DtQFm8g4Jh9R5D sha512-s9uhbJTCZv4WfH/F81fgS6B6XNhOuH21Xouv5X'
+                'Pp35WlFR7ykkIafUG8cma4vbEfheH1NVbjsON5BHm8U13I4g==">'
+                '</script>'), rendered_content)
             self.assertIn((
-                '<link href="/static/django_webpack_loader_bundles/main.css" rel="stylesheet" '
-                'integrity="sha256-cYWwRvS04/VsttQYx4BalKYrBDuw5t8vKFhWB/LKX30=" />'),
-                result.rendered_content
+                '<link href="http://custom-static-host.com/main.css" '
+                'rel="stylesheet" integrity="sha256-cYWwRvS04/VsttQYx4BalKYrB'
+                'Duw5t8vKFhWB/LKX30= sha384-V/UxbrsEy8BK5nd+sBlN31Emmq/WdDDdI'
+                '01UR8wKIFkIr6vEaT5YRaeLMfLcAQvS sha512-aigPxglXDA33t9s5i0vRa'
+                'p5b7dFwyp7cSN6x8rOXrPpCTMubOR7qTFpmTIa8z9B0wtXxbSheBPNCEURBH'
+                'KLQPw=="/>'),
+                rendered_content
+            )
+
+    def test_integrity_with_crossorigin_empty(self):
+        self.compile_bundles('webpack.config.integrity.js')
+
+        loader = get_loader(DEFAULT_CONFIG)
+        with patch.dict(loader.config, {'INTEGRITY': True, 'CROSSORIGIN': '', 'CACHE': False}):
+            view = TemplateView.as_view(template_name='single.html')
+            request = self.factory.get('/')
+            request.META['HTTP_HOST'] = 'crossorigin-custom-static-host.com'
+            result = view(request)
+            rendered_content = result.rendered_content
+
+            self.assertIn((
+                '<script src="http://custom-static-host.com/main.js" '
+                'integrity="sha256-Yk6uAc7SoE41LSNc9zTBxij8YhVqBIIuRpLCaTyqrlQ= '
+                'sha384-cwtz5c2CaEK8Q8ZeraWgf3qo7eO5jUDE8XMo00QTUCcbmF/fLuDtQFm8'
+                'g4Jh9R5D sha512-s9uhbJTCZv4WfH/F81fgS6B6XNhOuH21Xouv5XPp35WlFR7'
+                'ykkIafUG8cma4vbEfheH1NVbjsON5BHm8U13I4g==" '
+                'crossorigin></script>'
+            ), rendered_content)
+            self.assertIn((
+                '<link href="http://custom-static-host.com/main.css" '
+                'rel="stylesheet" '
+                'integrity="sha256-cYWwRvS04/VsttQYx4BalKYrBDuw5t8vKFhWB/LKX30= '
+                'sha384-V/UxbrsEy8BK5nd+sBlN31Emmq/WdDDdI01UR8wKIFkIr6vEaT5YRaeL'
+                'MfLcAQvS sha512-aigPxglXDA33t9s5i0vRap5b7dFwyp7cSN6x8rOXrPpCTMu'
+                'bOR7qTFpmTIa8z9B0wtXxbSheBPNCEURBHKLQPw==" '
+                'crossorigin/>'),
+                rendered_content
+            )
+
+    def test_integrity_with_crossorigin_anonymous(self):
+        self.compile_bundles('webpack.config.integrity.js')
+
+        loader = get_loader(DEFAULT_CONFIG)
+        with patch.dict(loader.config, {'INTEGRITY': True, 'CROSSORIGIN': 'anonymous', 'CACHE': False}):
+            view = TemplateView.as_view(template_name='single.html')
+            request = self.factory.get('/')
+            request.META['HTTP_HOST'] = 'crossorigin-custom-static-host.com'
+            result = view(request)
+            rendered_content = result.rendered_content
+
+            self.assertIn((
+                '<script src="http://custom-static-host.com/main.js" '
+                'integrity="sha256-Yk6uAc7SoE41LSNc9zTBxij8YhVqBIIuRpLCaTyqrlQ= '
+                'sha384-cwtz5c2CaEK8Q8ZeraWgf3qo7eO5jUDE8XMo00QTUCcbmF/fLuDtQFm8'
+                'g4Jh9R5D sha512-s9uhbJTCZv4WfH/F81fgS6B6XNhOuH21Xouv5XPp35WlFR7'
+                'ykkIafUG8cma4vbEfheH1NVbjsON5BHm8U13I4g==" '
+                'crossorigin="anonymous"></script>'
+            ), rendered_content)
+            self.assertIn((
+                '<link href="http://custom-static-host.com/main.css" '
+                'rel="stylesheet" '
+                'integrity="sha256-cYWwRvS04/VsttQYx4BalKYrBDuw5t8vKFhWB/LKX30= '
+                'sha384-V/UxbrsEy8BK5nd+sBlN31Emmq/WdDDdI01UR8wKIFkIr6vEaT5YRaeL'
+                'MfLcAQvS sha512-aigPxglXDA33t9s5i0vRap5b7dFwyp7cSN6x8rOXrPpCTMu'
+                'bOR7qTFpmTIa8z9B0wtXxbSheBPNCEURBHKLQPw==" '
+                'crossorigin="anonymous"/>'),
+                rendered_content
+            )
+
+    def test_integrity_with_crossorigin_use_credentials(self):
+        self.compile_bundles('webpack.config.integrity.js')
+
+        loader = get_loader(DEFAULT_CONFIG)
+        with patch.dict(loader.config, {'INTEGRITY': True, 'CROSSORIGIN': 'use-credentials', 'CACHE': False}):
+            view = TemplateView.as_view(template_name='single.html')
+            request = self.factory.get('/')
+            request.META['HTTP_HOST'] = 'crossorigin-custom-static-host.com'
+            result = view(request)
+            rendered_content = result.rendered_content
+
+            self.assertIn((
+                '<script src="http://custom-static-host.com/main.js" '
+                'integrity="sha256-Yk6uAc7SoE41LSNc9zTBxij8YhVqBIIuRpLCaTyqrlQ= '
+                'sha384-cwtz5c2CaEK8Q8ZeraWgf3qo7eO5jUDE8XMo00QTUCcbmF/fLuDtQFm8'
+                'g4Jh9R5D sha512-s9uhbJTCZv4WfH/F81fgS6B6XNhOuH21Xouv5XPp35WlFR7'
+                'ykkIafUG8cma4vbEfheH1NVbjsON5BHm8U13I4g==" '
+                'crossorigin="use-credentials"></script>'
+            ), rendered_content)
+            self.assertIn((
+                '<link href="http://custom-static-host.com/main.css" '
+                'rel="stylesheet" '
+                'integrity="sha256-cYWwRvS04/VsttQYx4BalKYrBDuw5t8vKFhWB/LKX30= '
+                'sha384-V/UxbrsEy8BK5nd+sBlN31Emmq/WdDDdI01UR8wKIFkIr6vEaT5YRaeL'
+                'MfLcAQvS sha512-aigPxglXDA33t9s5i0vRap5b7dFwyp7cSN6x8rOXrPpCTMu'
+                'bOR7qTFpmTIa8z9B0wtXxbSheBPNCEURBHKLQPw==" '
+                'crossorigin="use-credentials"/>'),
+                rendered_content
             )
 
     def test_integrity_missing_config(self):
@@ -242,14 +351,15 @@ class LoaderTestCase(TestCase):
         view = TemplateView.as_view(template_name='single.html')
         request = self.factory.get('/')
         result = view(request)
+        rendered_content = result.rendered_content
 
         self.assertIn((
-            '<script src="/static/django_webpack_loader_bundles/main.js" >'
-            '</script>'), result.rendered_content
+            '<script src="http://custom-static-host.com/main.js">'
+            '</script>'), rendered_content
         )
         self.assertIn((
-            '<link href="/static/django_webpack_loader_bundles/main.css" rel="stylesheet" />'),
-            result.rendered_content
+            '<link href="http://custom-static-host.com/main.css" rel="stylesheet"/>'),
+            rendered_content
         )
 
         # return removed key
@@ -271,7 +381,7 @@ class LoaderTestCase(TestCase):
         result = view(request)
 
         self.assertIn((
-            '<script src="/static/django_webpack_loader_bundles/main.js.gz" >'
+            '<script src="/static/django_webpack_loader_bundles/main.js.gz">'
             '</script>'), result.rendered_content)
 
     def test_jinja2(self):
@@ -294,12 +404,14 @@ class LoaderTestCase(TestCase):
         with self.settings(**settings):
             request = self.factory.get('/')
             result = view(request)
+            rendered_content = result.rendered_content
+
             self.assertIn((
                 '<link href="/static/django_webpack_loader_bundles'
-                '/main.css" rel="stylesheet" />'), result.rendered_content)
+                '/main.css" rel="stylesheet"/>'), rendered_content)
             self.assertIn((
                 '<script src="/static/django_webpack_loader_bundles/main.js" '
-                'async charset="UTF-8"></script>'), result.rendered_content)
+                'async charset="UTF-8"></script>'), rendered_content)
 
     def test_reporting_errors(self):
         self.compile_bundles('webpack.config.error.js')
@@ -318,6 +430,127 @@ class LoaderTestCase(TestCase):
             self.assertIn(
                 'Cannot resolve bundle {0}'.format(missing_bundle_name),
                 str(e))
+
+    def test_get_bundle_uses_same_assets_snapshot_when_iterated(self):
+        class ChangingAssetsLoader(WebpackLoader):
+            def __init__(self, name, config):
+                super().__init__(name, config)
+                self.load_assets_calls = 0
+                self.assets_snapshots = [
+                    {
+                        'status': 'done',
+                        'chunks': {'main': ['old.js']},
+                        'assets': {'old.js': {'name': 'old.js'}},
+                    },
+                    {
+                        'status': 'done',
+                        'chunks': {'main': ['new.js']},
+                        'assets': {'new.js': {'name': 'new.js'}},
+                    },
+                ]
+
+            def load_assets(self):
+                snapshot_index = min(
+                    self.load_assets_calls, len(self.assets_snapshots) - 1)
+                self.load_assets_calls += 1
+                return self.assets_snapshots[snapshot_index]
+
+        loader = ChangingAssetsLoader(DEFAULT_CONFIG, {
+            'CACHE': False,
+            'BUNDLE_DIR_NAME': 'django_webpack_loader_bundles/',
+            'TIMEOUT': None,
+            'POLL_INTERVAL': 0.1,
+            'ignores': [],
+            'INTEGRITY': False,
+        })
+
+        bundle = loader.get_bundle('main')
+
+        self.assertEqual(list(bundle), [{
+            'name': 'old.js',
+            'url': '/static/django_webpack_loader_bundles/old.js',
+        }])
+        self.assertEqual(loader.load_assets_calls, 1)
+
+    def test_cached_compile_status_is_reloaded_while_debug_polling(self):
+        class CompilingThenDoneLoader(WebpackLoader):
+            def __init__(self, name, config):
+                super().__init__(name, config)
+                self.load_assets_calls = 0
+                self.assets_snapshots = [
+                    {'status': 'compile'},
+                    {
+                        'status': 'done',
+                        'chunks': {'main': ['main.js']},
+                        'assets': {'main.js': {'name': 'main.js'}},
+                    },
+                ]
+
+            def load_assets(self):
+                snapshot_index = min(
+                    self.load_assets_calls, len(self.assets_snapshots) - 1)
+                self.load_assets_calls += 1
+                return self.assets_snapshots[snapshot_index]
+
+        loader = CompilingThenDoneLoader('COMPILE_CACHE_DEBUG', {
+            'CACHE': True,
+            'BUNDLE_DIR_NAME': 'django_webpack_loader_bundles/',
+            'TIMEOUT': 1,
+            'POLL_INTERVAL': 0,
+            'ignores': [],
+            'INTEGRITY': False,
+        })
+
+        with self.settings(DEBUG=True):
+            bundle = loader.get_bundle('main')
+
+        self.assertEqual(list(bundle), [{
+            'name': 'main.js',
+            'url': '/static/django_webpack_loader_bundles/main.js',
+        }])
+        self.assertEqual(loader.load_assets_calls, 2)
+        self.assertEqual(loader._assets[loader.name]['status'], 'done')
+
+    def test_cached_compile_status_is_reloaded_after_bad_stats(self):
+        class CompilingThenDoneLoader(WebpackLoader):
+            def __init__(self, name, config):
+                super().__init__(name, config)
+                self.load_assets_calls = 0
+                self.assets_snapshots = [
+                    {'status': 'compile'},
+                    {
+                        'status': 'done',
+                        'chunks': {'main': ['main.js']},
+                        'assets': {'main.js': {'name': 'main.js'}},
+                    },
+                ]
+
+            def load_assets(self):
+                snapshot_index = min(
+                    self.load_assets_calls, len(self.assets_snapshots) - 1)
+                self.load_assets_calls += 1
+                return self.assets_snapshots[snapshot_index]
+
+        loader = CompilingThenDoneLoader('COMPILE_CACHE_PRODUCTION', {
+            'CACHE': True,
+            'BUNDLE_DIR_NAME': 'django_webpack_loader_bundles/',
+            'TIMEOUT': None,
+            'POLL_INTERVAL': 0.1,
+            'ignores': [],
+            'INTEGRITY': False,
+        })
+
+        with self.settings(DEBUG=False):
+            with self.assertRaises(WebpackLoaderBadStatsError):
+                loader.get_bundle('main')
+            bundle = loader.get_bundle('main')
+
+        self.assertEqual(list(bundle), [{
+            'name': 'main.js',
+            'url': '/static/django_webpack_loader_bundles/main.js',
+        }])
+        self.assertEqual(loader.load_assets_calls, 2)
+        self.assertEqual(loader._assets[loader.name]['status'], 'done')
 
     def test_missing_stats_file(self):
         stats_file = settings.WEBPACK_LOADER[DEFAULT_CONFIG]['STATS_FILE']
@@ -408,13 +641,13 @@ class LoaderTestCase(TestCase):
         """
         self.compile_bundles('webpack.config.skipCommon.js')
         asset_vendor = (
-            '<script src="/static/django_webpack_loader_bundles/vendors.js" >'
+            '<script src="/static/django_webpack_loader_bundles/vendors.js">'
             '</script>')
         asset_app1 = (
-            '<script src="/static/django_webpack_loader_bundles/app1.js" >'
+            '<script src="/static/django_webpack_loader_bundles/app1.js">'
             '</script>')
         asset_app2 = (
-            '<script src="/static/django_webpack_loader_bundles/app2.js" >'
+            '<script src="/static/django_webpack_loader_bundles/app2.js">'
             '</script>')
 
         # Shouldn't call any `warn()` here
@@ -477,13 +710,13 @@ class LoaderTestCase(TestCase):
             ]
         }
         asset_vendor = (
-            '<script src="/static/django_webpack_loader_bundles/vendors.js" >'
+            '<script src="/static/django_webpack_loader_bundles/vendors.js">'
             '</script>')
         asset_app1 = (
-            '<script src="/static/django_webpack_loader_bundles/app1.js" >'
+            '<script src="/static/django_webpack_loader_bundles/app1.js">'
             '</script>')
         asset_app2 = (
-            '<script src="/static/django_webpack_loader_bundles/app2.js" >'
+            '<script src="/static/django_webpack_loader_bundles/app2.js">'
             '</script>')
         warning_call = MockCall(
             message=_WARNING_MESSAGE, category=RuntimeWarning)
@@ -544,7 +777,7 @@ class LoaderTestCase(TestCase):
             '{% render_bundle "app1" %}'
             '{% get_files "app2" skip_common_chunks=True as app2_files %}'
             '{% for f in app2_files %}'
-            '    <link rel="prefetch" href="{{ f.url }}" />'
+            '    <link rel="prefetch" href="{{ f.url }}"/>'
             '{% endfor %}'),
         )  # type: Template
         output = template.render(context=Context())
@@ -599,13 +832,13 @@ class LoaderTestCase(TestCase):
         """
         request = self.factory.get(path='/')
         asset_vendor = (
-            '<script src="/static/django_webpack_loader_bundles/vendors.js" >'
+            '<script src="/static/django_webpack_loader_bundles/vendors.js">'
             '</script>')
         asset_app1 = (
-            '<script src="/static/django_webpack_loader_bundles/app1.js" >'
+            '<script src="/static/django_webpack_loader_bundles/app1.js">'
             '</script>')
         asset_app2 = (
-            '<script src="/static/django_webpack_loader_bundles/app2.js" >'
+            '<script src="/static/django_webpack_loader_bundles/app2.js">'
             '</script>')
         rendered_template = template.render(
             context=None, request=request)
@@ -626,13 +859,13 @@ class LoaderTestCase(TestCase):
         """
         request = self.factory.get(path='/')
         asset_vendor = (
-            '<script src="/static/django_webpack_loader_bundles/vendors.js" >'
+            '<script src="/static/django_webpack_loader_bundles/vendors.js">'
             '</script>')
         asset_app1 = (
-            '<script src="/static/django_webpack_loader_bundles/app1.js" >'
+            '<script src="/static/django_webpack_loader_bundles/app1.js">'
             '</script>')
         asset_app2 = (
-            '<script src="/static/django_webpack_loader_bundles/app2.js" >'
+            '<script src="/static/django_webpack_loader_bundles/app2.js">'
             '</script>')
         rendered_template = template.render(
             context=None, request=request)
@@ -664,13 +897,13 @@ class LoaderTestCase(TestCase):
             ]
         }
         asset_vendor = (
-            '<script src="/static/django_webpack_loader_bundles/vendors.js" >'
+            '<script src="/static/django_webpack_loader_bundles/vendors.js">'
             '</script>')
         asset_app1 = (
-            '<script src="/static/django_webpack_loader_bundles/app1.js" >'
+            '<script src="/static/django_webpack_loader_bundles/app1.js">'
             '</script>')
         asset_app2 = (
-            '<script src="/static/django_webpack_loader_bundles/app2.js" >'
+            '<script src="/static/django_webpack_loader_bundles/app2.js">'
             '</script>')
 
         with self.settings(**settings):
@@ -707,13 +940,13 @@ class LoaderTestCase(TestCase):
             ]
         }
         asset_vendor = (
-            '<script src="/static/django_webpack_loader_bundles/vendors.js" >'
+            '<script src="/static/django_webpack_loader_bundles/vendors.js">'
             '</script>')
         asset_app1 = (
-            '<script src="/static/django_webpack_loader_bundles/app1.js" >'
+            '<script src="/static/django_webpack_loader_bundles/app1.js">'
             '</script>')
         asset_app2 = (
-            '<script src="/static/django_webpack_loader_bundles/app2.js" >'
+            '<script src="/static/django_webpack_loader_bundles/app2.js">'
             '</script>')
 
         with self.settings(**settings):
@@ -832,16 +1065,68 @@ class LoaderTestCase(TestCase):
         # return removed key
         loader.config['SKIP_COMMON_CHUNKS'] = skip_common_chunks
 
+    def test_skip_common_chunks_get_files_then_get_files(self):
+        self.compile_bundles('webpack.config.skipCommon.js')
+        asset_vendor = '/static/django_webpack_loader_bundles/vendors.js'
+        asset_app2 = '/static/django_webpack_loader_bundles/app2.js'
+
+        template = Template(template_string=(
+            '{% load render_bundle get_files from webpack_loader %}'
+            '{% get_files "app1" skip_common_chunks=True as app1_files %}'
+            '{% for f in app1_files %}<link rel="prefetch" href="{{ f.url }}"/>{% endfor %}'
+            '{% get_files "app2" skip_common_chunks=True as app2_files %}'
+            '{% for f in app2_files %}<link rel="prefetch" href="{{ f.url }}"/>{% endfor %}'
+        ))
+        request = self.factory.get(path='/')
+        output = template.render(context=Context({'request': request}))
+
+        self.assertEqual(output.count(asset_vendor), 1)
+        self.assertIn(asset_app2, output)
+
+    def test_skip_common_chunks_get_files_then_render_bundle(self):
+        self.compile_bundles('webpack.config.skipCommon.js')
+        asset_vendor = '/static/django_webpack_loader_bundles/vendors.js'
+        asset_app2 = '/static/django_webpack_loader_bundles/app2.js'
+
+        template = Template(template_string=(
+            '{% load render_bundle get_files from webpack_loader %}'
+            '{% get_files "app1" skip_common_chunks=True as app1_files %}'
+            '{% for f in app1_files %}<link rel="prefetch" href="{{ f.url }}"/>{% endfor %}'
+            '{% render_bundle "app2" skip_common_chunks=True %}'
+        ))
+        request = self.factory.get(path='/')
+        output = template.render(context=Context({'request': request}))
+
+        self.assertEqual(output.count(asset_vendor), 1)
+        self.assertIn(asset_app2, output)
+
+    def test_skip_common_chunks_render_bundle_then_get_files(self):
+        self.compile_bundles('webpack.config.skipCommon.js')
+        asset_vendor = '/static/django_webpack_loader_bundles/vendors.js'
+        asset_app2 = '/static/django_webpack_loader_bundles/app2.js'
+
+        template = Template(template_string=(
+            '{% load render_bundle get_files from webpack_loader %}'
+            '{% render_bundle "app1" skip_common_chunks=True %}'
+            '{% get_files "app2" skip_common_chunks=True as app2_files %}'
+            '{% for f in app2_files %}<link rel="prefetch" href="{{ f.url }}"/>{% endfor %}'
+        ))
+        request = self.factory.get(path='/')
+        output = template.render(context=Context({'request': request}))
+
+        self.assertEqual(output.count(asset_vendor), 1)
+        self.assertIn(asset_app2, output)
+
     def test_get_as_tags_direct_usage(self):
         self.compile_bundles('webpack.config.skipCommon.js')
         
         asset_vendor = (
-            '<script src="/static/django_webpack_loader_bundles/vendors.js" >'
+            '<script src="/static/django_webpack_loader_bundles/vendors.js">'
             '</script>')
         asset_app1 = (
-            '<link href="/static/django_webpack_loader_bundles/app1.css" rel="stylesheet" />')
+            '<link href="/static/django_webpack_loader_bundles/app1.css" rel="stylesheet"/>')
         asset_app2 = (
-            '<script src="/static/django_webpack_loader_bundles/app1.js" >'
+            '<script src="/static/django_webpack_loader_bundles/app1.js">'
             '</script>')
         
         tags = get_as_tags('app1')
@@ -850,3 +1135,92 @@ class LoaderTestCase(TestCase):
         self.assertEqual(tags[0], asset_vendor)
         self.assertEqual(tags[1], asset_app1)
         self.assertEqual(tags[2], asset_app2)
+
+    def test_get_url_to_tag_dict_with_nonce(self):
+        """Test the get_as_url_to_tag_dict function with nonce attribute handling."""
+
+        self.compile_bundles('webpack.config.simple.js')
+
+        loader = get_loader(DEFAULT_CONFIG)
+        with patch.dict(loader.config, {"CSP_NONCE": True, 'CACHE': False}):
+            # Create a request with csp_nonce
+            request = self.factory.get('/')
+            request.csp_nonce = "test-nonce-123"
+
+            # Get tag dict with nonce enabled
+            tag_dict = get_as_url_to_tag_dict('main', extension='js', attrs='', request=request)
+            # Verify nonce is in the tag
+            self.assertIn('nonce="test-nonce-123"', tag_dict['/static/django_webpack_loader_bundles/main.js'])
+
+            # Test with existing nonce in attrs - should not duplicate
+            tag_dict = get_as_url_to_tag_dict('main', extension='js', attrs='nonce="existing-nonce"', request=request)
+            self.assertIn('nonce="existing-nonce"', tag_dict['/static/django_webpack_loader_bundles/main.js'])
+            self.assertNotIn('nonce="test-nonce-123"', tag_dict['/static/django_webpack_loader_bundles/main.js'])
+
+            # Test without request - should not have nonce
+            tag_dict = get_as_url_to_tag_dict('main', extension='js', attrs='', request=None)
+            self.assertNotIn('nonce=', tag_dict['/static/django_webpack_loader_bundles/main.js'])
+
+            # Test with request but no csp_nonce attribute - should not have nonce
+            request_without_nonce = self.factory.get('/')
+            tag_dict = get_as_url_to_tag_dict('main', extension='js', attrs='', request=request_without_nonce)
+            self.assertNotIn('nonce=', tag_dict['/static/django_webpack_loader_bundles/main.js'])
+
+    def test_get_url_to_tag_dict_with_nonce_disabled(self):
+        self.compile_bundles('webpack.config.simple.js')
+
+        loader = get_loader(DEFAULT_CONFIG)
+        with patch.dict(loader.config, {"CSP_NONCE": False, 'CACHE': False}):
+            # Create a request without csp_nonce
+            request = self.factory.get('/')
+
+            # should not have nonce
+            tag_dict = get_as_url_to_tag_dict('main', extension='js', attrs='', request=request)
+            self.assertNotIn('nonce=', tag_dict['/static/django_webpack_loader_bundles/main.js'])
+
+            # Create a request with csp_nonce
+            request_with_nonce = self.factory.get('/')
+            request_with_nonce.csp_nonce = "test-nonce-123"
+
+            # Test with CSP_NONCE disabled - should not have nonce
+            tag_dict = get_as_url_to_tag_dict('main', extension='js', attrs='', request=request_with_nonce)
+            self.assertNotIn('nonce=', tag_dict['/static/django_webpack_loader_bundles/main.js'])
+
+    def test_get_url_to_tag_dict_js_preload_includes_integrity_and_nonce(self):
+        self.compile_bundles('webpack.config.integrity.js')
+
+        loader = get_loader(DEFAULT_CONFIG)
+        with patch.dict(loader.config, {'INTEGRITY': True, 'CSP_NONCE': True, 'CACHE': False}):
+            request = self.factory.get('/')
+            request.csp_nonce = 'test-nonce'
+
+            tag_dict = get_as_url_to_tag_dict('main', extension='js', attrs='', request=request, is_preload=True)
+            tag = tag_dict['http://custom-static-host.com/main.js']
+
+            self.assertIn('rel="preload"', tag)
+            self.assertIn('as="script"', tag)
+            self.assertIn('integrity=', tag)
+            self.assertIn('nonce="test-nonce"', tag)
+
+    def test_get_url_to_tag_dict_with_different_extensions(self):
+        """Test the get_as_url_to_tag_dict function with different file extensions."""
+
+        self.compile_bundles('webpack.config.simple.js')
+
+        loader = get_loader(DEFAULT_CONFIG)
+        with patch.dict(loader.config, {"CSP_NONCE": True, 'CACHE': False}):
+            # Create a request with csp_nonce
+            request = self.factory.get('/')
+            request.csp_nonce = "test-nonce-123"
+
+            # JavaScript file
+            tag_dict = get_as_url_to_tag_dict('main', extension='js', attrs='', request=request)
+            self.assertIn('<script src="/static/django_webpack_loader_bundles/main.js"', 
+                        tag_dict['/static/django_webpack_loader_bundles/main.js'])
+            self.assertIn('nonce="test-nonce-123"', tag_dict['/static/django_webpack_loader_bundles/main.js'])
+
+            # CSS file
+            tag_dict = get_as_url_to_tag_dict('main', extension='css', attrs='', request=request)
+            self.assertIn('<link href="/static/django_webpack_loader_bundles/main.css" rel="stylesheet"', 
+                        tag_dict['/static/django_webpack_loader_bundles/main.css'])
+            self.assertIn('nonce="test-nonce-123"', tag_dict['/static/django_webpack_loader_bundles/main.css'])

@@ -1,17 +1,50 @@
 import json
-import time
 import os
+import time
+from functools import lru_cache
 from io import open
+from typing import Dict, Optional
+from urllib.parse import urlparse
+from warnings import warn
 
 from django.conf import settings
 from django.contrib.staticfiles.storage import staticfiles_storage
+from django.http.request import HttpRequest
 
 from .exceptions import (
+    WebpackBundleLookupError,
     WebpackError,
     WebpackLoaderBadStatsError,
     WebpackLoaderTimeoutError,
-    WebpackBundleLookupError,
 )
+
+_CROSSORIGIN_NO_REQUEST = (
+    'The crossorigin attribute might be necessary but you did not pass a '
+    'request object. django_webpack_loader needs a request object to be able '
+    'to know when to emit the crossorigin attribute on link and script tags. '
+    'Chunk name: {chunk_name}')
+_CROSSORIGIN_NO_HOST = (
+    'You have passed the request object but it does not have a "HTTP_HOST", '
+    'thus django_webpack_loader can\'t know if the crossorigin header will '
+    'be necessary or not. Chunk name: {chunk_name}')
+_NONCE_NO_REQUEST = (
+    'You have enabled the adding of nonce attributes to generated tags via '
+    'django_webpack_loader, but haven\'t passed a request. '
+    'Chunk name: {chunk_name}')
+_NONCE_NO_CSPNONCE = (
+    'django_webpack_loader can\'t generate a nonce tag for a bundle, '
+    'because the passed request doesn\'t contain a "csp_nonce". '
+    'Chunk name: {chunk_name}')
+_LOADER_POSSIBLE_LIMBO = (
+    'You are using django_webpack_loader with default timeout "None" '
+    'which can cause request to hang indefinitely. '
+    'Validate status of webpack-stats.json file if you experience infinite loading.'
+)
+
+@lru_cache(maxsize=100)
+def _get_netloc(url: str) -> str:
+    'Return a cached netloc (host:port) for the passed `url`.'
+    return urlparse(url=url).netloc
 
 
 class WebpackLoader:
@@ -33,28 +66,83 @@ class WebpackLoader:
 
     def get_assets(self):
         if self.config["CACHE"]:
-            if self.name not in self._assets:
-                self._assets[self.name] = self.load_assets()
-            return self._assets[self.name]
+            assets = self._assets.get(self.name)
+            if not assets or assets.get("status") == "compile":
+                assets = self.load_assets()
+                if assets.get("status") != "compile":
+                    self._assets[self.name] = assets
+            return assets
         return self.load_assets()
 
     def get_asset_by_source_filename(self, name):
         files = self.get_assets()["assets"].values()
         return next((x for x in files if x.get("sourceFilename") == name), None)
 
-    def get_integrity_attr(self, chunk):
-        if not self.config.get("INTEGRITY"):
-            return " "
+    def _add_crossorigin(
+            self, request: Optional[HttpRequest], chunk: Dict[str, str],
+            integrity: str, attrs_l: str) -> str:
+        'Return an added `crossorigin` attribute if necessary.'
+        def_value = f'integrity="{integrity}"'
+        if not request:
+            message = _CROSSORIGIN_NO_REQUEST.format(chunk_name=chunk['name'])
+            warn(message=message, category=RuntimeWarning)
+            return def_value
+        if 'crossorigin' in attrs_l:
+            return def_value
+        host: Optional[str] = request.META.get('HTTP_HOST')
+        if not host:
+            message = _CROSSORIGIN_NO_HOST.format(chunk_name=chunk['name'])
+            warn(message=message, category=RuntimeWarning)
+            return def_value
+        netloc = _get_netloc(url=chunk['url'])
+        if netloc == '' or netloc == host:
+            # Crossorigin not necessary
+            return def_value
+        cfgval: str = self.config.get('CROSSORIGIN')
+        if cfgval == '':
+            return f'{def_value} crossorigin'
+        return f'{def_value} crossorigin="{cfgval}"'
 
-        integrity = chunk.get("integrity")
+    def get_integrity_attr(
+            self, chunk: Dict[str, str], request: Optional[HttpRequest],
+            attrs_l: str) -> Optional[str]:
+        if not self.config.get('INTEGRITY'):
+            # Crossorigin only necessary when integrity is used
+            return None
+
+        integrity = chunk.get('integrity')
         if not integrity:
             raise WebpackLoaderBadStatsError(
-                "The stats file does not contain valid data: INTEGRITY is set to True, "
-                'but chunk does not contain "integrity" key. Maybe you forgot to add '
-                "integrity: true in your BundleTracker configuration?"
+                'The stats file does not contain valid data: INTEGRITY is set '
+                'to True, but chunk does not contain "integrity" key. Maybe '
+                'you forgot to add integrity: true in your '
+                'BundleTrackerPlugin configuration?'
             )
+        return self._add_crossorigin(
+            request=request,
+            chunk=chunk,
+            integrity=integrity,
+            attrs_l=attrs_l,
+        )
 
-        return ' integrity="{}" '.format(integrity.partition(" ")[0])
+    def get_nonce_attr(
+            self, chunk: Dict[str, str], request: Optional[HttpRequest],
+            attrs: str) -> Optional[str]:
+        'Return an added nonce for CSP when available.'
+        if not self.config.get('CSP_NONCE'):
+            return None
+        if request is None:
+            message = _NONCE_NO_REQUEST.format(chunk_name=chunk['name'])
+            warn(message=message, category=RuntimeWarning)
+            return ''
+        nonce = getattr(request, 'csp_nonce', None)
+        if nonce is None:
+            message = _NONCE_NO_CSPNONCE.format(chunk_name=chunk['name'])
+            warn(message=message, category=RuntimeWarning)
+            return ''
+        if 'nonce=' in attrs.lower():
+            return ''
+        return f'nonce="{nonce}"'
 
     def filter_chunks(self, chunks):
         filtered_chunks = []
@@ -66,20 +154,21 @@ class WebpackLoader:
 
         return filtered_chunks
 
-    def map_chunk_files_to_url(self, chunks):
-        assets = self.get_assets()
+    def map_chunk_files_to_url(self, chunks, assets=None):
+        assets = assets or self.get_assets()
         files = assets["assets"]
 
         add_integrity = self.config.get("INTEGRITY")
 
         for chunk in chunks:
-            url = self.get_chunk_url(files[chunk])
+            asset = files[chunk]
+            url = self.get_chunk_url(asset)
 
             if add_integrity:
                 yield {
                     "name": chunk,
                     "url": url,
-                    "integrity": files[chunk].get("integrity"),
+                    "integrity": asset.get("integrity"),
                 }
             else:
                 yield {"name": chunk, "url": url}
@@ -108,6 +197,10 @@ class WebpackLoader:
                 time.sleep(self.config["POLL_INTERVAL"])
                 if timeout and (time.time() - timeout > start):
                     timed_out = True
+                if not timeout:
+                    warn(
+                        message=_LOADER_POSSIBLE_LIMBO, category=RuntimeWarning
+                    )
                 assets = self.get_assets()
 
             if timed_out:
@@ -140,7 +233,7 @@ class WebpackLoader:
                         "Cannot resolve asset {0}.".format(chunk)
                     )
 
-            return self.map_chunk_files_to_url(filtered_chunks)
+            return self.map_chunk_files_to_url(filtered_chunks, assets=assets)
 
         elif assets.get("status") == "error":
             if "file" not in assets:

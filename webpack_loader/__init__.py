@@ -1,5 +1,5 @@
 __author__ = "Vinta Software"
-__version__ = "3.1.1"
+__version__ = "3.2.4"
 
 import django
 
